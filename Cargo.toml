@@ -9,4 +9,5 @@ edition = "2018"
 anyhow = "1.0"
 structopt = "0.3"
 x11rb = { version = "0.8", features = ["image"] }
+termion = "1.5"
 image = "0.23"

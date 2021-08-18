@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 use image::io::Reader as ImageReader;
 use image::RgbImage;
 use std::path::PathBuf;
@@ -71,11 +71,15 @@ fn get_current_window_id() -> Result<Window> {
         .output()
         .with_context(|| "Failed to run xdotool")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // TODO check exit code
-    stdout
-        .trim()
-        .parse()
-        .with_context(|| "Couldn't parse window ID number from xdotool")
+    if output.status.success() {
+        stdout
+            .trim()
+            .parse()
+            .with_context(|| "Couldn't parse window ID number from xdotool")
+    } else {
+        Err(Error::msg(String::from_utf8(output.stderr)?))
+            .with_context(|| "xdotool exited with non-zero status")
+    }
 }
 
 fn rowcol_to_pixels(

@@ -154,8 +154,13 @@ impl<'a> ImageDisplay<'a> {
         self.window.is_some()
     }
 
-    fn remove(&mut self) -> Result<()> {
-        // TODO
+    fn remove(&mut self, conn: &impl Connection) -> Result<()> {
+        assert!(self.is_shown());
+        let window = self.window.unwrap();
+
+        conn.unmap_window(window)?;
+        self.window = None;
+
         Ok(())
     }
 
@@ -166,7 +171,7 @@ impl<'a> ImageDisplay<'a> {
         (x, y): (i16, i16),
     ) -> Result<()> {
         if self.is_shown() {
-            self.remove()?;
+            self.remove(conn)?;
         }
         assert!(!self.is_shown());
 

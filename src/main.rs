@@ -141,7 +141,9 @@ impl<'a> ImageDisplay<'a> {
             x11image::ImageOrder::MSBFirst,
             image.into_raw().into(),
         )?;
-        let img = img.reencode(img_layout, pixel_layout, conn.setup())?.into_owned();
+        let img = img
+            .reencode(img_layout, pixel_layout, conn.setup())?
+            .into_owned();
 
         Ok(Self {
             image: Cow::Owned(img),

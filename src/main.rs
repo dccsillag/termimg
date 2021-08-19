@@ -1,6 +1,7 @@
 use anyhow::{Context, Error, Result};
 use image::io::Reader as ImageReader;
 use image::RgbImage;
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::process::Command;
 use structopt::StructOpt;
@@ -105,89 +106,150 @@ fn rowcol_to_pixels(
     ))
 }
 
-fn show_image(image: RgbImage, window: Window, (x, y): (i16, i16)) -> Result<()> {
-    // Connect to the X server
-    let (conn, screen_num) = x11rb::connect(None).with_context(|| "Couldn't connect to X")?;
-    let screen = &conn.setup().roots[screen_num];
+struct ImageDisplay<'a> {
+    image: Cow<'a, x11image::Image<'a>>,
+    parent_window: Window,
 
-    // Convert (x, y) to pixels
-    let (x, y) = rowcol_to_pixels(&conn, window, (x, y))?;
+    window: Option<Window>,
+}
 
-    // Get image information and create x11rb image
-    let (w, h) = image.dimensions();
-    let w = w as u16;
-    let h = h as u16;
-    let img = x11image::Image::new(
-        w,
-        h,
-        x11image::ScanlinePad::Pad8,
-        24,
-        x11image::BitsPerPixel::B24,
-        x11image::ImageOrder::MSBFirst,
-        image.into_raw().into(),
-    )?;
+impl<'a> ImageDisplay<'a> {
+    fn new(
+        conn: &impl Connection,
+        screen: &Screen,
+        image: RgbImage,
+        parent_window: Window,
+    ) -> Result<Self> {
+        // Get image information and create x11rb image
+        let (w, h) = image.dimensions();
+        let w = w as u16;
+        let h = h as u16;
 
-    // Change x11rb to use the appropriate format
-    let img_layout = x11image::PixelLayout::new(
-        x11image::ColorComponent::new(8, 16)?,
-        x11image::ColorComponent::new(8, 8)?,
-        x11image::ColorComponent::new(8, 0)?,
-    );
-    let pixel_layout = check_visual(screen, screen.root_visual)?;
-    let img = img.reencode(img_layout, pixel_layout, conn.setup())?;
+        // Change x11rb image to use the appropriate format
+        let img_layout = x11image::PixelLayout::new(
+            x11image::ColorComponent::new(8, 16)?,
+            x11image::ColorComponent::new(8, 8)?,
+            x11image::ColorComponent::new(8, 0)?,
+        );
+        let pixel_layout = check_visual(screen, screen.root_visual)?;
+        let img = x11image::Image::new(
+            w,
+            h,
+            x11image::ScanlinePad::Pad8,
+            24,
+            x11image::BitsPerPixel::B24,
+            x11image::ImageOrder::MSBFirst,
+            image.into_raw().into(),
+        )?;
+        let img = img.reencode(img_layout, pixel_layout, conn.setup())?.into_owned();
 
-    // Create graphics context
-    let gc_id = conn.generate_id()?;
-    conn.create_gc(
-        gc_id,
-        screen.root,
-        &CreateGCAux::new().graphics_exposures(0),
-    )?;
-    // Create and paint pixmap
-    let pixmap_id = conn.generate_id()?;
-    conn.create_pixmap(screen.root_depth, pixmap_id, screen.root, w, h)?;
-    img.put(&conn, pixmap_id, gc_id, 0, 0)?;
-    // Create window
-    let win_id = conn.generate_id()?;
-    conn.create_window(
-        screen.root_depth,
-        win_id,
-        screen.root, // current_window_id,
-        0,
-        0,
-        w,
-        h,
-        0,
-        WindowClass::INPUT_OUTPUT,
-        0,
-        &CreateWindowAux::default().background_pixmap(pixmap_id),
-    )?;
-    conn.reparent_window(win_id, window, x, y)?;
+        Ok(Self {
+            image: Cow::Owned(img),
+            parent_window,
+            window: None,
+        })
+    }
 
-    // Free pixmap&gcontext
-    conn.free_pixmap(pixmap_id)?;
-    conn.free_gc(gc_id)?;
+    fn is_shown(&self) -> bool {
+        self.window.is_some()
+    }
 
-    // Map the window
-    conn.map_window(win_id)?;
+    fn remove(&mut self) -> Result<()> {
+        // TODO
+        Ok(())
+    }
 
-    // Flush the connection
-    conn.flush()?;
+    fn show_at(
+        &mut self,
+        conn: &impl Connection,
+        screen: &Screen,
+        (x, y): (i16, i16),
+    ) -> Result<()> {
+        if self.is_shown() {
+            self.remove()?;
+        }
+        assert!(!self.is_shown());
 
-    // TODO: rework this loop
-    loop {
+        // Create graphics context
+        let gc_id = conn.generate_id()?;
+        conn.create_gc(
+            gc_id,
+            screen.root,
+            &CreateGCAux::new().graphics_exposures(0),
+        )?;
+        // Create and paint pixmap
+        let pixmap_id = conn.generate_id()?;
+        conn.create_pixmap(
+            screen.root_depth,
+            pixmap_id,
+            screen.root,
+            self.image.width(),
+            self.image.height(),
+        )?;
+        self.image.put(conn, pixmap_id, gc_id, 0, 0)?;
+        // Create window
+        let win_id = conn.generate_id()?;
+        conn.create_window(
+            screen.root_depth,
+            win_id,
+            screen.root,
+            0,
+            0,
+            self.image.width(),
+            self.image.height(),
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::default().background_pixmap(pixmap_id),
+        )?;
+        conn.reparent_window(win_id, self.parent_window, x, y)?;
+
+        // Free pixmap&gcontext
+        conn.free_pixmap(pixmap_id)?;
+        conn.free_gc(gc_id)?;
+
+        // Map the window
+        conn.map_window(win_id)?;
+
+        // Flush the connection
+        conn.flush()?;
+
+        // Set fields
+        self.window = Some(win_id);
+
+        Ok(())
+    }
+
+    fn tick(&mut self, conn: &impl Connection) -> Result<()> {
+        // TODO
         println!("Event: {:?}", conn.wait_for_event()?);
+
+        Ok(())
     }
 }
 
 fn main() -> Result<()> {
     let opt: Opt = Opt::from_args();
 
-    let image: RgbImage = ImageReader::open(opt.image_file)?.decode()?.to_rgb8();
+    // Connect to the X server
+    let (conn, screen_num) = x11rb::connect(None).with_context(|| "Couldn't connect to X")?;
+    let screen = &conn.setup().roots[screen_num];
 
+    // Get current window
     let window = get_current_window_id()?;
 
-    show_image(image, window, (opt.row, opt.col))?;
+    // Convert (x, y) to pixels
+    let (x, y) = rowcol_to_pixels(&conn, window, (opt.col, opt.row))?;
 
-    Ok(())
+    // Load the image
+    let image: RgbImage = ImageReader::open(opt.image_file)?.decode()?.to_rgb8();
+
+    // Show the image
+    let mut display_image = ImageDisplay::new(&conn, screen, image, window)?;
+    display_image.show_at(&conn, screen, (x, y))?;
+
+    // Handle it
+    loop {
+        display_image.tick(&conn)?;
+    }
 }
